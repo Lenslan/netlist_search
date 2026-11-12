@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 
 use netlist_search::liberty::CellLib;
+use netlist_search::logic::{AnalyzeOpts, analyze};
 use netlist_search::netlist::design::Design;
 use netlist_search::netlist::index::ModuleIndex;
 use netlist_search::report::{Radix, ReportOpts, render};
@@ -67,9 +68,14 @@ struct Args {
     #[arg(long)]
     expand: bool,
 
-    /// Never print a result that could not be proven
+    /// Show a wire as a bit of `bus + K` or `bus * K` rather than as the
+    /// equivalent range or set test, whenever both describe it
     #[arg(long)]
-    strict: bool,
+    prefer_arith: bool,
+
+    /// Only trace and print local forms; skip the endpoint forms
+    #[arg(long)]
+    no_lift: bool,
 
     /// Write the report here instead of stdout
     #[arg(short, long)]
@@ -165,15 +171,28 @@ fn run(args: &Args, radix: Radix) -> Result<()> {
         dump_cone: args.dump_cone,
     };
 
+    let analyze_opts = AnalyzeOpts {
+        radix,
+        expand: args.expand,
+        prefer_arith: args.prefer_arith,
+        ..AnalyzeOpts::default()
+    };
+
     let mut report = String::new();
     let mut nodes = 0usize;
+    let mut endpoints = 0usize;
+    let mut t_lift = std::time::Duration::ZERO;
     for (i, &bit) in bits.iter().enumerate() {
         if i > 0 {
             report.push('\n');
         }
         let cone = trace(&design, &path, bit, &trace_opts)?;
         nodes += cone.nodes.len();
-        report.push_str(&render(&design, &path, &cone, None, &report_opts));
+        endpoints += cone.endpoints.len();
+        let t = Instant::now();
+        let analysis = (!args.no_lift).then(|| analyze(&cone, &analyze_opts));
+        t_lift += t.elapsed();
+        report.push_str(&render(&design, &path, &cone, analysis.as_ref(), &report_opts));
     }
     let t_trace = t0.elapsed();
 
@@ -190,16 +209,18 @@ fn run(args: &Args, radix: Radix) -> Result<()> {
 
     if args.stats {
         eprintln!(
-            "stats: lib {:.2}s, index {:.2}s, resolve {:.2}s, trace {:.2}s, {} modules parsed, \
-             {} net bits in {} cone(s), {} endpoints",
+            "stats: lib {:.2}s, index {:.2}s, resolve {:.2}s, trace {:.2}s, lift {:.2}s, total {:.2}s; \
+             {} modules parsed, {} net bits in {} cone(s), {} endpoints",
             t_lib.as_secs_f64(),
             (t_index - t_lib).as_secs_f64(),
             (t_resolve - t_index).as_secs_f64(),
-            (t_trace - t_resolve).as_secs_f64(),
+            (t_trace - t_resolve).saturating_sub(t_lift).as_secs_f64(),
+            t_lift.as_secs_f64(),
+            t0.elapsed().as_secs_f64(),
             design.parsed_modules(),
             nodes,
             bits.len(),
-            0,
+            endpoints,
         );
     }
     Ok(())

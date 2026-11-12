@@ -126,15 +126,9 @@ pub fn render(
             if let Some(form) = &info.endpoint_form {
                 let _ = writeln!(s, "        endpoint: {form}");
             } else if info.cut {
-                let _ = writeln!(
-                    s,
-                    "        endpoint: <not computed: logic is too large{}>",
-                    if info.support > 0 {
-                        format!(", {} inputs", info.support)
-                    } else {
-                        String::new()
-                    }
-                );
+                let _ = writeln!(s, "        endpoint: [CUT] logic too large to compute");
+            } else if let Some(why) = &info.omitted {
+                let _ = writeln!(s, "        endpoint: <{why}>");
             }
             if !info.aliases.is_empty() {
                 let _ = writeln!(s, "        aliases:  {}", info.aliases.join(", "));
@@ -143,14 +137,21 @@ pub fn render(
     }
     let _ = writeln!(s);
 
-    if !cone.notes.is_empty() {
-        let _ = writeln!(s, "Notes:");
-        for n in &cone.notes {
-            let _ = writeln!(s, "  - {n}");
-        }
-    }
+    // Everything uncertain goes here: trace notes, analysis notes, and what
+    // each non-obvious endpoint is.
+    let mut notes: Vec<String> = cone.notes.clone();
     if let Some(a) = analysis {
-        for n in &a.notes {
+        notes.extend(a.notes.iter().cloned());
+    }
+    notes.extend(
+        cone.endpoints
+            .iter()
+            .filter(|e| !e.detail.is_empty())
+            .map(|e| format!("[{}] {}: {}", e.kind.label(), e.name, e.detail)),
+    );
+    if !notes.is_empty() {
+        let _ = writeln!(s, "Notes:");
+        for n in &notes {
             let _ = writeln!(s, "  - {n}");
         }
     }

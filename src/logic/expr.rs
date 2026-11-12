@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use super::bdd::{BResult, Bd, Bdd, Blowup, FALSE, TRUE};
+use super::bdd::{BResult, Bdd, Blowup, FALSE, TRUE};
 use super::bus::VarInfo;
 use super::words;
 use super::words::VResult;
@@ -628,6 +628,7 @@ pub fn word_text(w: &Word, vars: &[VarInfo], radix: Radix) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logic::bdd::Bd;
 
     fn vars(names: &[&str]) -> Vec<VarInfo> {
         let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
