@@ -166,7 +166,12 @@ pub enum Expr {
         cin: Option<u32>,
         bit: u32,
     },
-    /// Bit meaning of `kind`, `off` bits into `data` (see `sel_kind` doc).
+    /// `items[sel]`: a multiplexer with one entry per value of `sel`.
+    Case {
+        sel: Word,
+        items: Vec<Rc<Expr>>,
+    },
+    /// Bit `off` of `data >> sel` / `data << sel`; `Index` is `data[sel]`.
     Select {
         kind: SelKind,
         data: Word,
@@ -193,6 +198,7 @@ impl Expr {
             Expr::Inside { vals, .. } => 1 + vals.len(),
             Expr::ArithBit { .. } => 3,
             Expr::Select { .. } => 3,
+            Expr::Case { items, .. } => 1 + items.iter().map(|x| x.size()).sum::<usize>(),
         }
     }
 
@@ -320,6 +326,14 @@ impl Expr {
                 };
                 Ok(vec.get(target).copied().unwrap_or(FALSE))
             }
+            Expr::Case { sel, items } => {
+                let s = sel.bdds(b)?;
+                let mut table = Vec::with_capacity(items.len());
+                for it in items {
+                    table.push(it.to_bdd(b)?);
+                }
+                words::dynamic_select(b, &table, &s, FALSE)
+            }
             Expr::Select {
                 kind,
                 data,
@@ -401,7 +415,7 @@ impl Expr {
                     .collect();
                 (
                     format!("{} inside {{{}}}", word_text(a, vars, radix), list.join(", ")),
-                    PREC_CMP,
+                    PREC_MUX,
                 )
             }
             Expr::ArithBit {
@@ -417,6 +431,17 @@ impl Expr {
                 }
                 (format!("({s})[{bit}]"), PREC_ATOM)
             }
+            Expr::Case { sel, items } => {
+                let arms: Vec<String> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, it)| format!("{i}: {}", it.render_prec(vars, radix, 0)))
+                    .collect();
+                (
+                    format!("case ({}) {{{}}}", word_text(sel, vars, radix), arms.join(", ")),
+                    PREC_ATOM,
+                )
+            }
             Expr::Select {
                 kind,
                 data,
@@ -425,24 +450,22 @@ impl Expr {
             } => {
                 let d = word_text(data, vars, radix);
                 let s = word_text(sel, vars, radix);
-                match kind {
-                    SelKind::Index => {
-                        let slice = as_slice(data, vars);
-                        match (off, slice) {
-                            (0, Some((base, 0, _))) => (format!("{base}[{s}]"), PREC_ATOM),
-                            (0, Some((base, lo, _))) => {
-                                (format!("{base}[{s} + {lo}]"), PREC_ATOM)
-                            }
-                            _ => (format!("({d})[{s}]"), PREC_ATOM),
-                        }
+                // Bit `lo` of `bus[hi:0] >> s` is `bus[lo + s]`: show a slice that
+                // starts above bit 0 as the shift of the whole bus.
+                let slice = as_slice(data, vars);
+                let text = match (kind, &slice) {
+                    (SelKind::Index, Some((base, 0, _))) if *off == 0 => format!("{base}[{s}]"),
+                    (SelKind::Index | SelKind::Shr, Some((base, lo, hi))) => {
+                        format!("({base}[{hi}:0] >> {s})[{}]", lo + *off as i64)
                     }
-                    SelKind::Shr if *off == 0 => (format!("{d} >> {s}"), PREC_XOR),
-                    SelKind::Shr => (format!("({d} >> {s})[{off}]"), PREC_ATOM),
-                    SelKind::Ashr if *off == 0 => (format!("$signed({d}) >>> {s}"), PREC_XOR),
-                    SelKind::Ashr => (format!("($signed({d}) >>> {s})[{off}]"), PREC_ATOM),
-                    SelKind::Shl if *off == 0 => (format!("{d} << {s}"), PREC_XOR),
-                    SelKind::Shl => (format!("({d} << {s})[{off}]"), PREC_ATOM),
-                }
+                    (SelKind::Ashr, Some((base, lo, hi))) => {
+                        format!("($signed({base}[{hi}:0]) >>> {s})[{}]", lo + *off as i64)
+                    }
+                    (SelKind::Index | SelKind::Shr, None) => format!("({d} >> {s})[{off}]"),
+                    (SelKind::Ashr, None) => format!("($signed({d}) >>> {s})[{off}]"),
+                    (SelKind::Shl, _) => format!("({d} << {s})[{off}]"),
+                };
+                (text, PREC_ATOM)
             }
         };
         if p < min {
@@ -453,11 +476,13 @@ impl Expr {
     }
 }
 
+// Verilog precedence, loosest first. `inside` is given the loosest level so
+// that it is always parenthesised inside another operator.
 const PREC_MUX: u8 = 0;
-const PREC_CMP: u8 = 1;
-const PREC_OR: u8 = 2;
-const PREC_XOR: u8 = 3;
-const PREC_AND: u8 = 4;
+const PREC_OR: u8 = 1;
+const PREC_XOR: u8 = 2;
+const PREC_AND: u8 = 3;
+const PREC_CMP: u8 = 4;
 const PREC_ATOM: u8 = 5;
 
 /// A number as a literal: plain decimal, or sized in hex/binary.

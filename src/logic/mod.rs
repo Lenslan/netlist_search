@@ -3,8 +3,12 @@
 pub mod bdd;
 pub mod expr;
 pub mod isop;
+pub mod lift;
 pub mod bus;
 pub mod words;
+
+#[cfg(test)]
+mod tests_lift;
 
 /// What the analysis found out about one wire of the cone.
 #[derive(Debug, Clone, Default)]
