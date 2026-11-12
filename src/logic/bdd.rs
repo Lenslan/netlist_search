@@ -119,6 +119,15 @@ impl Bdd {
         self.nodes[f as usize].var
     }
 
+    /// Cofactors of `f` with respect to `v`, which must be at or above its root.
+    pub fn cofactors(&self, f: Bd, v: u32) -> (Bd, Bd) {
+        assert!(
+            self.nodes[f as usize].var == TERMINAL || self.nodes[f as usize].var <= v,
+            "variable is below the root of f"
+        );
+        self.split(f, v)
+    }
+
     /// Cofactors of `f` for `v`, where `v` is at or above the root of `f`.
     fn split(&self, f: Bd, v: u32) -> (Bd, Bd) {
         let n = self.nodes[f as usize];

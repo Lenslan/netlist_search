@@ -2,6 +2,7 @@
 
 pub mod bdd;
 pub mod expr;
+pub mod isop;
 pub mod bus;
 pub mod words;
 
