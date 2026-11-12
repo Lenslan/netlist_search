@@ -1,5 +1,6 @@
 //! Boolean analysis of a traced cone: naming, BDDs and expression lifting.
 
+pub mod bdd;
 pub mod bus;
 
 /// What the analysis found out about one wire of the cone.
