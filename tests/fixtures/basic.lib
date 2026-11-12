@@ -1,0 +1,271 @@
+/* Minimal standard-cell library used by the netlist_search tests.
+ * Timing data is fake; only pins, functions and sequential groups matter. */
+library (basic) {
+  delay_model : table_lookup;
+  time_unit : "1ns";
+  capacitive_load_unit (1, pf);
+  operating_conditions (typical) {
+    process : 1;
+    voltage : 1.8;
+  }
+  lu_table_template (delay_2x2) {
+    variable_1 : input_net_transition;
+    variable_2 : total_output_net_capacitance;
+    index_1 ("0.1, 0.5");
+    index_2 ("0.01, 0.1");
+  }
+
+  cell (INVX1) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.002; }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      timing () {
+        related_pin : "A";
+        timing_sense : negative_unate;
+        cell_rise (delay_2x2) {
+          index_1 ("0.1, 0.5");
+          index_2 ("0.01, 0.1");
+          values ("0.10, 0.20", \
+                  "0.15, 0.25");
+        }
+        cell_fall (delay_2x2) {
+          values ("0.10, 0.20", "0.15, 0.25");
+        }
+      }
+    }
+  }
+
+  cell (BUFX2) {
+    area : 1.5;
+    pin (A) { direction : input; }
+    pin (Y) { direction : output; function : "A"; }
+  }
+
+  cell (AND2X1) {
+    pin (A, B) { direction : input; }
+    pin (Y) { direction : output; function : "(A&B)"; }
+  }
+
+  cell (AND3X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (C) { direction : input; }
+    pin (Y) { direction : output; function : "(A&B&C)"; }
+  }
+
+  cell (OR2X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "(A|B)"; }
+  }
+
+  cell (OR3X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (C) { direction : input; }
+    pin (Y) { direction : output; function : "(A+B+C)"; }
+  }
+
+  cell (NAND2X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "(A B)'"; }
+  }
+
+  cell (NAND3X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (C) { direction : input; }
+    pin (Y) { direction : output; function : "!(A&B&C)"; }
+  }
+
+  cell (NAND4X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (C) { direction : input; }
+    pin (D) { direction : input; }
+    pin (Y) { direction : output; function : "!(A&B&C&D)"; }
+  }
+
+  cell (NOR2X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "!(A|B)"; }
+  }
+
+  cell (NOR3X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (C) { direction : input; }
+    pin (Y) { direction : output; function : "!(A|B|C)"; }
+  }
+
+  cell (NOR4X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (C) { direction : input; }
+    pin (D) { direction : input; }
+    pin (Y) { direction : output; function : "!(A|B|C|D)"; }
+  }
+
+  cell (XOR2X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "(A^B)"; }
+  }
+
+  cell (XNOR2X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "!(A^B)"; }
+  }
+
+  /* Y = S ? B : A */
+  cell (MUX2X1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (S) { direction : input; }
+    pin (Y) { direction : output; function : "(S&B)|(!S&A)"; }
+  }
+
+  cell (AOI21X1) {
+    pin (A0) { direction : input; }
+    pin (A1) { direction : input; }
+    pin (B0) { direction : input; }
+    pin (Y) { direction : output; function : "!((A0&A1)|B0)"; }
+  }
+
+  cell (AOI22X1) {
+    pin (A0) { direction : input; }
+    pin (A1) { direction : input; }
+    pin (B0) { direction : input; }
+    pin (B1) { direction : input; }
+    pin (Y) { direction : output; function : "((A0 A1)+(B0 B1))'"; }
+  }
+
+  cell (OAI21X1) {
+    pin (A0) { direction : input; }
+    pin (A1) { direction : input; }
+    pin (B0) { direction : input; }
+    pin (Y) { direction : output; function : "!((A0|A1)&B0)"; }
+  }
+
+  cell (OAI22X1) {
+    pin (A0) { direction : input; }
+    pin (A1) { direction : input; }
+    pin (B0) { direction : input; }
+    pin (B1) { direction : input; }
+    pin (Y) { direction : output; function : "!((A0|A1)&(B0|B1))"; }
+  }
+
+  /* Full adder: two outputs. */
+  cell (ADDFX1) {
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (CI) { direction : input; }
+    pin (S) { direction : output; function : "A^B^CI"; }
+    pin (CO) { direction : output; function : "(A&B)|(A&CI)|(B&CI)"; }
+  }
+
+  cell (TIEHI) {
+    pin (Y) { direction : output; function : "1"; }
+  }
+
+  cell (TIELO) {
+    pin (Y) { direction : output; function : "0" }
+  }
+
+  cell (DFFX1) {
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+    }
+    pin (D) { direction : input; }
+    pin (CK) { direction : input; clock : true; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+
+  cell (DFFRX1) {
+    ff (IQ, IQN) {
+      next_state : "D";
+      clocked_on : "CK";
+      clear : "!RN";
+    }
+    pin (D) { direction : input; }
+    pin (CK) { direction : input; clock : true; }
+    pin (RN) { direction : input; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () { related_pin : "CK"; timing_type : rising_edge; }
+    }
+    pin (QN) { direction : output; function : "IQN"; }
+  }
+
+  /* Scan flop: the test_cell group repeats pin names and must be ignored. */
+  cell (SDFFX1) {
+    ff ("IQ", "IQN") {
+      next_state : "(SE&SI)|(!SE&D)";
+      clocked_on : "CK";
+    }
+    pin (D) { direction : input; }
+    pin (SI) { direction : input; }
+    pin (SE) { direction : input; }
+    pin (CK) { direction : input; }
+    pin (Q) { direction : output; function : "IQ"; }
+    test_cell () {
+      pin (D) { direction : input; }
+      pin (SI) { direction : input; signal_type : test_scan_in; }
+      pin (BOGUS) { direction : output; function : "D"; }
+      ff (IQ, IQN) { next_state : "D"; clocked_on : "CK"; }
+    }
+  }
+
+  cell (LATX1) {
+    latch (IQ, IQN) {
+      enable : "G";
+      data_in : "D";
+    }
+    pin (D) { direction : input; }
+    pin (G) { direction : input; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+
+  cell (TBUFX1) {
+    pin (A) { direction : input; }
+    pin (OE) { direction : input; }
+    pin (Y) { direction : output; function : "A"; three_state : "!OE"; }
+  }
+
+  /* Integrated clock gate: described by a statetable only. */
+  cell (ICGX1) {
+    clock_gating_integrated_cell : "latch_posedge";
+    statetable ("CK E", "ENL") {
+      table : "L H : - : H, L L : - : L, H - : - : N";
+    }
+    pin (CK) { direction : input; }
+    pin (E) { direction : input; }
+    pin (GCK) { direction : output; state_function : "CK * ENL"; }
+  }
+
+  /* Hard macro: bus pins, no function at all. */
+  cell (RAM16X4) {
+    area : 500;
+    bus (A) {
+      bus_type : bus4;
+      direction : input;
+      pin (A[0]) { capacitance : 0.01; }
+    }
+    bus (D) { bus_type : bus4; direction : input; }
+    bus (Q) {
+      bus_type : bus4;
+      direction : output;
+      timing () { related_pin : "CLK"; }
+    }
+    pin (CLK) { direction : input; }
+    pin (WE) { direction : input; }
+    pg_pin (VDD) { voltage_name : VDD; pg_type : primary_power; }
+  }
+}
