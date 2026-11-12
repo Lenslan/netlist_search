@@ -4,4 +4,5 @@
 pub mod liberty;
 pub mod logic;
 pub mod netlist;
+pub mod report;
 pub mod trace;
