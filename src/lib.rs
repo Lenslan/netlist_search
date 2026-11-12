@@ -2,3 +2,4 @@
 //! lift the cone logic into readable RTL-style expressions.
 
 pub mod liberty;
+pub mod netlist;

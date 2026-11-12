@@ -26,13 +26,13 @@ pub(super) fn parse_library(text: &[u8], warnings: &mut Vec<String>) -> Result<V
                         Stmt::Eof => bail!(
                             "unexpected end of file inside library group opened at line {open}"
                         ),
-                        Stmt::Attr(..) | Stmt::Complex(..) => {}
+                        Stmt::Attr(..) | Stmt::Complex => {}
                     }
                 }
             }
             Stmt::Group(..) => cur.skip_body()?,
             Stmt::End => bail!("unmatched '}}' at line {}", cur.line()),
-            Stmt::Attr(..) | Stmt::Complex(..) => {}
+            Stmt::Attr(..) | Stmt::Complex => {}
         }
     }
     Ok(cells)
@@ -90,7 +90,7 @@ fn parse_cell(cur: &mut Cur, name: &[u8], warnings: &mut Vec<String>) -> Result<
             Stmt::Eof => {
                 bail!("unexpected end of file inside cell ({name}) opened at line {open}")
             }
-            Stmt::Attr(..) | Stmt::Complex(..) => {}
+            Stmt::Attr(..) | Stmt::Complex => {}
         }
     }
     if kind == CellKind::Comb && has_statetable {
@@ -146,7 +146,7 @@ fn parse_pin_body(
             },
             // Nested groups: timing, internal_power, member pins of a bus, ...
             Stmt::Group(..) => cur.skip_body()?,
-            Stmt::Complex(..) => {}
+            Stmt::Complex => {}
             Stmt::End => break,
             Stmt::Eof => bail!(
                 "unexpected end of file inside a pin group of cell ({cell}) opened at line {open}"
@@ -160,7 +160,7 @@ enum Stmt<'a> {
     /// `name : value ;`
     Attr(&'a [u8], &'a [u8]),
     /// `name ( args ) ;`
-    Complex(&'a [u8], Vec<&'a [u8]>),
+    Complex,
     /// `name ( args ) {` — the caller must consume or skip the body.
     Group(&'a [u8], Vec<&'a [u8]>),
     /// `}`
@@ -276,9 +276,9 @@ impl<'a> Cur<'a> {
                         }
                         Some(b';') => {
                             self.p += 1;
-                            Ok(Stmt::Complex(name, args))
+                            Ok(Stmt::Complex)
                         }
-                        _ => Ok(Stmt::Complex(name, args)),
+                        _ => Ok(Stmt::Complex),
                     }
                 }
                 _ => bail!(
