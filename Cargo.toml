@@ -1,0 +1,23 @@
+[package]
+name = "netlist_search"
+version = "0.1.0"
+edition = "2024"
+description = "Trace a gate-level netlist wire backwards to registers, black boxes and ports, and lift the cone logic into readable RTL-style expressions"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+memchr = "2"
+memmap2 = "0.9"
+rayon = "1"
+rustc-hash = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[profile.test]
+opt-level = 2

@@ -67,8 +67,11 @@ sel? a : b                    sel & a | !sel & b
 === Cone of u_core/u_fsm/next_state[2]   (module fsm) ===
 
 Endpoints (7):
-  [REG]     state[3:0]             inst state_reg[3:0]            DFFRX2  Q
-  [REG]     u_core/u_cfg/mode[1]   inst u_core/u_cfg/mode_reg[1]  DFFRX2  Q    (via input port mode[1])
+  [REG]     state[3]               inst state_reg[3]              DFFRX2
+  [REG]     state[2]               inst state_reg[2]              DFFRX2
+  [REG]     state[1]               inst state_reg[1]              DFFRX2
+  [REG]     state[0]               inst state_reg[0]              DFFRX2
+  [REG]     u_core/u_cfg/mode[1]   inst u_core/u_cfg/mode_reg[1]  DFFRX2
   [UNKNOWN] u_core/u_sram/U0       cell SRAM_1024x32 not in lib; pin dout[7] drives n1071
   [CONST]   1'b0
 
@@ -101,6 +104,7 @@ Notes:
 - 按距目标信号的深度排列。
 - 端点式过大（见 §6.5 预算）时省略，只给出依赖端点数。
 - 函数相同或互为取反的 wire 标注在 `aliases` 里。
+- 端点按位逐行列出（实例名精确，便于在网表里搜索）。
 - 未知 cell、假设、截断都进 `Notes` 单独说明。
 - 命名规则：目标实例内部的名字不带前缀；其他实例里的名字用从顶层开始的完整路径。
 
@@ -213,7 +217,7 @@ lib 的 `function` 表达式（`& | ^ ! + * ' ()` 等）解析成表达式树，
    - 递归深度、候选个数都有上限，超限回退到布尔式。
 3. **叶子识别器**（见 §6.4）：命中则产出字级/总线级表达式；否则产出最简与或式（Minato–Morreale ISOP）。
 4. **自检**（见 §7）：把渲染出的表达式反算回 BDD 与原函数比对。
-5. **局部式**：独立于 BDD，直接由驱动 cell 的函数代入输入 net 名生成（穿透 BUF/INV），如 `!(n1 & n2 | n3 & n4)`。这保证了即使 BDD 爆炸，也总有可读输出。
+5. **局部式**：独立于 BDD，直接由驱动 cell 的函数代入各输入 pin 实际连接的 net 名生成，如 `!(n1 & n2 | n3 & n4)`。不穿透 BUF/INV，保持与网表连接一致（反相器自己占一行）。这保证了即使 BDD 爆炸，也总有可读输出。
 
 渲染语法：Verilog 风格 `! & | ^ ?: == != < <= > >= + - * >> << {} []`；表达式取位写作 `(a + b)[3]`（便于阅读，非严格 Verilog 语法，文档中说明）。
 
