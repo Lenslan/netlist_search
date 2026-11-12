@@ -12,11 +12,11 @@ use std::collections::BinaryHeap;
 use std::rc::Rc;
 
 use anyhow::Result;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::liberty::{BoolExpr, CellDef, CellKind, Dir, PinDef};
-use crate::logic::bus::reg_signal_name;
-use crate::netlist::design::{Builtin, Design, InstPath, PinInfo};
+use crate::logic::bus::{reg_signal_name, split_index};
+use crate::netlist::design::{Builtin, CellRef, Design, InstPath, PinInfo};
 use crate::netlist::parser::{AssignKind, BitId, BitRef, Module};
 
 pub type NodeId = u32;
@@ -138,6 +138,10 @@ pub struct Cone {
     pub order: Vec<NodeId>,
     /// Every node, each after all the nodes it depends on.
     pub topo: Vec<NodeId>,
+    /// Names of bits that exist in the netlist, below the bits of an endpoint
+    /// bus, but are not part of the cone (e.g. `cnt[0]` when only `cnt[3:1]`
+    /// is read).
+    pub siblings: Vec<String>,
     pub notes: Vec<String>,
     pub truncated: bool,
 }
@@ -219,6 +223,15 @@ enum Driver<'d> {
     PortIn { port: u32, off: u32 },
 }
 
+/// Where an endpoint's name came from, to look for the other bits of its bus.
+#[derive(Clone, Copy)]
+enum NameSrc {
+    /// The name of a register instance: `(context, instance)`.
+    RegInst(u32, u32),
+    /// The name of a net bit: `(context, bit)`.
+    Net(u32, BitId),
+}
+
 struct Tracer<'d, 'a> {
     design: &'d Design<'a>,
     opts: TraceOpts,
@@ -232,6 +245,7 @@ struct Tracer<'d, 'a> {
     expanded: Vec<bool>,
     endpoints: Vec<Endpoint>,
     ep_of: FxHashMap<EpKey, EndpointId>,
+    name_src: Vec<(EndpointId, NameSrc)>,
     const_nodes: [Option<NodeId>; 3],
     func_cache: FxHashMap<(usize, usize), Rc<BoolExpr>>,
     heap: BinaryHeap<(Reverse<u32>, NodeId)>,
@@ -258,6 +272,7 @@ pub fn trace(design: &Design, path: &InstPath, bit: BitId, opts: &TraceOpts) -> 
         expanded: Vec::new(),
         endpoints: Vec::new(),
         ep_of: FxHashMap::default(),
+        name_src: Vec::new(),
         const_nodes: [None; 3],
         func_cache: FxHashMap::default(),
         heap: BinaryHeap::new(),
@@ -303,12 +318,14 @@ pub fn trace(design: &Design, path: &InstPath, bit: BitId, opts: &TraceOpts) -> 
         ));
     }
     let topo = t.topo_sort(target);
+    let siblings = t.siblings()?;
     Ok(Cone {
         target,
         nodes: t.nodes,
         endpoints: t.endpoints,
         order: t.order,
         topo,
+        siblings,
         notes: t.notes,
         truncated: t.truncated,
     })
@@ -394,7 +411,81 @@ impl<'d, 'a> Tracer<'d, 'a> {
     fn set_endpoint(&mut self, id: NodeId, kind: EndpointKind, detail: String) {
         let name = self.nodes[id as usize].name.clone();
         let ep = self.plain_endpoint(EpKey::Node(id), kind, name, detail);
+        if let Some((ctx, bit)) = self.keys[id as usize] {
+            self.name_src.push((ep, NameSrc::Net(ctx, bit)));
+        }
         self.nodes[id as usize].kind = NodeKind::Endpoint { ep, inv: false };
+    }
+
+    /// Bits that exist in the netlist below the bits of each endpoint bus but
+    /// are not in the cone. Knowing they exist lets the report say
+    /// `cnt[3:0] < 10` for a wire that only reads `cnt[3:1]`.
+    fn siblings(&self) -> Result<Vec<String>> {
+        let have: FxHashSet<&str> = self.endpoints.iter().map(|e| e.name.as_str()).collect();
+        // Highest index seen per bus, with the source of one of its bits.
+        let mut buses: Vec<(String, i64, NameSrc)> = Vec::new();
+        let mut slot: FxHashMap<String, usize> = FxHashMap::default();
+        for &(ep, src) in &self.name_src {
+            let (base, Some(idx)) = split_index(&self.endpoints[ep as usize].name) else {
+                continue;
+            };
+            match slot.get(&base) {
+                Some(&i) => {
+                    if idx > buses[i].1 {
+                        buses[i].1 = idx;
+                        buses[i].2 = src;
+                    }
+                }
+                None => {
+                    slot.insert(base.clone(), buses.len());
+                    buses.push((base, idx, src));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (base, top, src) in buses {
+            if !(1..=4096).contains(&top) {
+                continue;
+            }
+            for i in 0..top {
+                let name = format!("{base}[{i}]");
+                if !have.contains(name.as_str()) && self.bit_exists(src, i)? {
+                    out.push(name);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Does bit `index` of the bus that `src` belongs to exist in the netlist?
+    fn bit_exists(&self, src: NameSrc, index: i64) -> Result<bool> {
+        match src {
+            NameSrc::Net(ctx, bit) => {
+                let m = self.module(ctx)?;
+                let (net, _) = m.net_of_bit(bit);
+                Ok(m.nets[net as usize].is_vec && m.bit_of(net, index as i32).is_some())
+            }
+            NameSrc::RegInst(ctx, inst) => {
+                let m = self.module(ctx)?;
+                let name = text(m.inst_name(inst));
+                let (base, Some(_)) = split_index(&name) else {
+                    return Ok(false);
+                };
+                // Same spelling as the bit we know: `x_reg[3]` or `x_reg_3_`.
+                let other = if name.ends_with(']') {
+                    format!("{base}[{index}]")
+                } else {
+                    format!("{base}_{index}_")
+                };
+                Ok(match m.find_inst(other.as_bytes()) {
+                    Some(i) => matches!(
+                        self.design.cell_ref(m.inst_cell(i)),
+                        CellRef::Lib(c) if c.is_sequential()
+                    ),
+                    None => false,
+                })
+            }
+        }
     }
 
     /// The node for net bit `(ctx, bit)`, created on first use.
@@ -776,7 +867,16 @@ impl<'d, 'a> Tracer<'d, 'a> {
                     _ => None,
                 };
                 let (key, name, inv) = match polarity {
-                    Some(inv) => (EpKey::Cell(ctx, inst), self.reg_name(ctx, inst, cell, iq)?, inv),
+                    Some(inv) => {
+                        let (name, src) = self.reg_name(ctx, inst, cell, iq)?;
+                        let key = EpKey::Cell(ctx, inst);
+                        if !self.ep_of.contains_key(&key)
+                            && let Some(src) = src
+                        {
+                            self.name_src.push((self.endpoints.len() as u32, src));
+                        }
+                        (key, name, inv)
+                    }
                     // Function mixes the state with other pins: this pin is its own endpoint.
                     None => (
                         EpKey::Pin(ctx, inst, conn, pos),
@@ -828,13 +928,20 @@ impl<'d, 'a> Tracer<'d, 'a> {
     }
 
     /// Display name of a register: the RTL signal if the instance is named
-    /// `<signal>_reg...`, else the net on its Q pin.
-    fn reg_name(&self, ctx: u32, inst: u32, cell: &CellDef, iq: &str) -> Result<String> {
+    /// `<signal>_reg...`, else the net on its Q pin. Also says where the name
+    /// came from.
+    fn reg_name(
+        &self,
+        ctx: u32,
+        inst: u32,
+        cell: &CellDef,
+        iq: &str,
+    ) -> Result<(String, Option<NameSrc>)> {
         let m = self.module(ctx)?;
         let prefix = self.prefix(ctx);
         let inst_name = text(m.inst_name(inst));
         if let Some(sig) = reg_signal_name(&inst_name) {
-            return Ok(format!("{prefix}{sig}"));
+            return Ok((format!("{prefix}{sig}"), Some(NameSrc::RegInst(ctx, inst))));
         }
         let q = cell
             .pins
@@ -845,9 +952,12 @@ impl<'d, 'a> Tracer<'d, 'a> {
             && let [bit] = m.conn_bits(conn)
             && let Some(b) = bit.as_net()
         {
-            return Ok(format!("{prefix}{}", m.bit_name(b)));
+            return Ok((
+                format!("{prefix}{}", m.bit_name(b)),
+                Some(NameSrc::Net(ctx, b)),
+            ));
         }
-        Ok(format!("{prefix}{inst_name}"))
+        Ok((format!("{prefix}{inst_name}"), None))
     }
 
     /// Node `id` is a combinational function of the pins of `inst`.

@@ -464,3 +464,66 @@ endmodule";
         _ => panic!("{}", c.dump()),
     }
 }
+
+// ---- sibling bits -----------------------------------------------------------
+
+const SIB: &str = "module m (clk, d, sel, y, z, w, v);
+  input clk; input [7:0] d; input [1:0] sel; output y, z, w, v;
+  wire [3:0] cnt; wire [3:0] part; wire q5, q4;
+  DFFX1 \\cnt_reg[3] (.D(d[3]), .CK(clk), .Q(cnt[3]));
+  DFFX1 \\cnt_reg[2] (.D(d[2]), .CK(clk), .Q(cnt[2]));
+  DFFX1 \\cnt_reg[1] (.D(d[1]), .CK(clk), .Q(cnt[1]));
+  DFFX1 \\cnt_reg[0] (.D(d[0]), .CK(clk), .Q(cnt[0]));
+  DFFX1 lim_reg_5_ (.D(d[5]), .CK(clk), .Q(q5));
+  DFFX1 lim_reg_4_ (.D(d[4]), .CK(clk), .Q(q4));
+  DFFX1 lim_reg_0_ (.D(d[0]), .CK(clk), .Q());
+  DFFX1 \\part_reg[3] (.D(d[3]), .CK(clk), .Q(part[3]));
+  AND2X1 U1 (.A(cnt[3]), .B(cnt[2]), .Y(y));
+  AND2X1 U2 (.A(q5), .B(q4), .Y(z));
+  AND2X1 U3 (.A(d[6]), .B(d[5]), .Y(w));
+  AND2X1 U4 (.A(part[3]), .B(sel[1]), .Y(v));
+endmodule";
+
+fn siblings(c: &Cone) -> Vec<String> {
+    let mut s = c.siblings.clone();
+    s.sort();
+    s
+}
+
+#[test]
+fn lower_register_bits_outside_the_cone_are_siblings() {
+    let c = cone(SIB, "", "y");
+    assert_eq!(siblings(&c), ["cnt[0]", "cnt[1]"]);
+}
+
+#[test]
+fn siblings_follow_the_underscore_naming_style_and_must_exist() {
+    let c = cone(SIB, "", "z");
+    // lim_reg_0_ exists; bits 1 to 3 do not.
+    assert_eq!(siblings(&c), ["lim[0]"]);
+}
+
+#[test]
+fn lower_bits_of_a_port_bus_are_siblings() {
+    let c = cone(SIB, "", "w");
+    assert_eq!(siblings(&c), ["d[0]", "d[1]", "d[2]", "d[3]", "d[4]"]);
+}
+
+#[test]
+fn a_bit_whose_neighbours_do_not_exist_has_no_siblings() {
+    let c = cone(SIB, "", "v");
+    // part_reg[2..0] are not in the netlist; sel[0] is.
+    assert_eq!(siblings(&c), ["sel[0]"]);
+}
+
+#[test]
+fn siblings_in_other_instances_carry_the_instance_prefix() {
+    let src = "module sub (clk, d, q); input clk; input [1:0] d; output q; wire [1:0] st;
+  DFFX1 \\st_reg[1] (.D(d[1]), .CK(clk), .Q(st[1]));
+  DFFX1 \\st_reg[0] (.D(d[0]), .CK(clk), .Q(st[0]));
+  BUFX2 U1 (.A(st[1]), .Y(q));
+endmodule
+module top (clk, d, r); input clk; input [1:0] d; output r; sub u (.clk(clk), .d(d), .q(r)); endmodule";
+    let c = cone(src, "", "r");
+    assert_eq!(siblings(&c), ["/u/st[0]"]);
+}

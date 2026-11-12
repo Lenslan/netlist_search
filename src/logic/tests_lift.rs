@@ -60,7 +60,7 @@ impl Fx {
     fn lift_with(&mut self, f: Bd, opts: LiftOpts) -> String {
         let mut l = Lifter::new(&mut self.b, &self.vars, opts);
         let e = l.lift(f).expect("an expression is found");
-        assert!(l.notes.is_empty(), "{:?}", l.notes);
+        assert!(!l.take_mismatch(), "a lifted expression failed its proof");
         let text = e.render(&self.vars, Radix::Dec);
         let back = e.to_bdd(&mut self.b).unwrap();
         assert_eq!(back, f, "'{text}' is not the function it was lifted from");

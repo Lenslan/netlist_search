@@ -40,9 +40,9 @@ fn report_lists_endpoints_wires_and_local_forms() {
         &out,
         &[
             "=== Cone of nstate[2]   (module fsm) ===",
-            "Endpoints (5):",
+            "Endpoints (5): 4 REG, 1 PORT-IN",
             "[REG] state[3]",
-            "inst state_reg[3] DFFRX1",
+            "inst state_reg[3]  DFFRX1",
             "[PORT-IN] mode",
             "d0 nstate[2]",
             "AND2X1 U23",
@@ -91,9 +91,9 @@ fn instance_path_selects_the_module_instance() {
         &[
             "=== Cone of u_fsm/nstate[2]   (module fsm, instance u_fsm) ===",
             "[REG] /u_cfg/mode",
-            "inst /u_cfg/mode_reg DFFX1",
-            "local:    /mode_w  (input port)",
-            "local:    /u_cfg/mode  (submodule output)",
+            "inst /u_cfg/mode_reg  DFFX1",
+            "local:    /mode_w",
+            "local:    /u_cfg/mode",
         ],
     );
 }

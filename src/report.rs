@@ -2,105 +2,186 @@
 
 use std::fmt::Write;
 
-use crate::logic::Analysis;
-use crate::netlist::design::{Design, InstPath};
 use crate::liberty::BoolExpr;
-use crate::trace::{Cone, NodeId, NodeKind};
+use crate::logic::Analysis;
+use crate::logic::bus::split_index;
+use crate::netlist::design::{Design, InstPath};
+use crate::trace::{Cone, EndpointKind, NodeId, NodeKind};
 
 pub use crate::logic::expr::Radix;
 
-#[derive(Debug, Clone)]
-pub struct ReportOpts {
-    pub radix: Radix,
-    /// Only show wires whose logic depends on an endpoint whose name contains this.
-    pub filter: Option<String>,
-    /// Print endpoint forms even when they exceed the size budget.
-    pub expand: bool,
-    pub dump_cone: bool,
+/// Does the signal called `name` match the `--filter` pattern?
+///
+/// A pattern names a signal: `state` matches every bit of the bus `state`,
+/// `state[2]` one bit. A pattern without a path also matches the signal in
+/// any instance (`mode` matches `/u_core/u_cfg/mode`).
+pub fn filter_matches(name: &str, pattern: &str) -> bool {
+    let pattern = pattern.trim();
+    let one = |n: &str| n == pattern || split_index(n).0 == pattern;
+    if one(name) {
+        return true;
+    }
+    if !pattern.contains('/')
+        && let Some(i) = name.rfind('/')
+    {
+        return one(&name[i + 1..]);
+    }
+    false
 }
 
-impl Default for ReportOpts {
-    fn default() -> Self {
-        ReportOpts {
-            radix: Radix::Dec,
-            filter: None,
-            expand: false,
-            dump_cone: false,
+/// Which nodes are wires to print. With a filter, only the wires whose logic
+/// depends on a signal matching it. The flag is false for non-wire nodes.
+pub fn wires_to_show(cone: &Cone, filter: Option<&str>) -> Vec<bool> {
+    let is_wire = |n: usize| {
+        matches!(
+            cone.nodes[n].kind,
+            NodeKind::Gate { .. } | NodeKind::Alias { .. }
+        )
+    };
+    let Some(pattern) = filter else {
+        return (0..cone.nodes.len()).map(is_wire).collect();
+    };
+    let mut marked: Vec<bool> = cone
+        .nodes
+        .iter()
+        .map(|n| filter_matches(&n.name, pattern))
+        .collect();
+    // `topo` lists inputs before their users: one forward pass propagates.
+    for &n in &cone.topo {
+        if !marked[n as usize] && cone.inputs(n).iter().any(|&d| marked[d as usize]) {
+            marked[n as usize] = true;
         }
+    }
+    (0..cone.nodes.len()).map(|n| marked[n] && is_wire(n)).collect()
+}
+
+fn kind_rank(k: EndpointKind) -> u8 {
+    match k {
+        EndpointKind::Reg => 0,
+        EndpointKind::Latch => 1,
+        EndpointKind::PortIn => 2,
+        EndpointKind::SubmoduleOut => 3,
+        EndpointKind::Unknown => 4,
+        EndpointKind::BlackBox => 5,
+        EndpointKind::Inout => 6,
+        EndpointKind::ComplexAssign => 7,
+        EndpointKind::ConstX => 8,
+        EndpointKind::Undriven => 9,
+        EndpointKind::MultiDriver => 10,
+        EndpointKind::Loop => 11,
+        EndpointKind::Truncated => 12,
     }
 }
 
-/// Render the whole report for one traced bit.
+/// Render the report for one traced bit. `shown` is from `wires_to_show`.
 pub fn render(
     design: &Design,
     path: &InstPath,
     cone: &Cone,
     analysis: Option<&Analysis>,
-    opts: &ReportOpts,
+    shown: &[bool],
+    filter: Option<&str>,
 ) -> String {
     let mut s = String::new();
     let module = design.module_name(path.module());
     let inst = design.path_string(path);
-    let target = format!(
-        "{}{}",
-        if inst.is_empty() { String::new() } else { format!("{inst}/") },
-        cone.node(cone.target).name
-    );
-    let _ = writeln!(
-        s,
-        "=== Cone of {target}   (module {module}{}) ===",
-        if inst.is_empty() { String::new() } else { format!(", instance {inst}") }
-    );
+    let (target, place) = if inst.is_empty() {
+        (cone.node(cone.target).name.clone(), format!("module {module}"))
+    } else {
+        (
+            format!("{inst}/{}", cone.node(cone.target).name),
+            format!("module {module}, instance {inst}"),
+        )
+    };
+    let _ = writeln!(s, "=== Cone of {target}   ({place}) ===");
     let _ = writeln!(s);
 
+    // ---- endpoints ---------------------------------------------------------
     if cone.endpoints.is_empty() {
-        let _ = writeln!(s, "Endpoints: none (the whole cone is constant or unconnected)");
+        let _ = writeln!(s, "Endpoints: none (the cone is constant)");
     } else {
-        let _ = writeln!(s, "Endpoints ({}):", cone.endpoints.len());
-        for e in &cone.endpoints {
-            let mut line = format!("  [{}] {} ", e.kind.label(), e.name);
-            if line.len() < 34 {
-                line.push_str(&" ".repeat(34 - line.len()));
-            } else {
-                line.push(' ');
+        let mut order: Vec<usize> = (0..cone.endpoints.len()).collect();
+        let key = |i: usize| {
+            let e = &cone.endpoints[i];
+            let (base, idx) = split_index(&e.name);
+            (kind_rank(e.kind), base, -idx.unwrap_or(0))
+        };
+        order.sort_by_cached_key(|&i| key(i));
+        let mut counts: Vec<(EndpointKind, usize)> = Vec::new();
+        for &i in &order {
+            let k = cone.endpoints[i].kind;
+            match counts.last_mut() {
+                Some((last, n)) if *last == k => *n += 1,
+                _ => counts.push((k, 1)),
             }
+        }
+        let summary: Vec<String> = counts
+            .iter()
+            .map(|(k, n)| format!("{n} {}", k.label()))
+            .collect();
+        let _ = writeln!(s, "Endpoints ({}): {}", order.len(), summary.join(", "));
+        let width = order
+            .iter()
+            .map(|&i| cone.endpoints[i].kind.label().len() + cone.endpoints[i].name.len())
+            .max()
+            .unwrap_or(0)
+            .min(48);
+        for i in order {
+            let e = &cone.endpoints[i];
+            let head = format!("[{}] {}", e.kind.label(), e.name);
+            let mut line = format!("  {head:<w$}", w = width + 3);
             if let Some(inst) = &e.inst {
-                let _ = write!(line, "inst {inst} ");
+                let _ = write!(line, "  inst {inst}");
             }
             if let Some(cell) = &e.cell {
-                let _ = write!(line, "{cell}");
+                let _ = write!(line, "  {cell}");
             }
             let _ = writeln!(s, "{}", line.trim_end());
         }
     }
     let _ = writeln!(s);
 
-    let marked = opts.filter.as_ref().map(|f| depended_on(cone, analysis, f));
+    // ---- wires -------------------------------------------------------------
     let wires: Vec<NodeId> = cone
         .order
         .iter()
         .copied()
-        .filter(|&n| {
-            matches!(cone.node(n).kind, NodeKind::Gate { .. } | NodeKind::Alias { .. })
-                && marked.as_ref().is_none_or(|m| m[n as usize])
-        })
+        .filter(|&n| shown[n as usize])
         .collect();
-    let _ = writeln!(s, "Wires ({}), by distance from the target:", wires.len());
+    match filter {
+        Some(f) => {
+            let total = wires_to_show(cone, None).iter().filter(|&&b| b).count();
+            let _ = writeln!(
+                s,
+                "Wires ({} of {total} depend on '{f}'), by distance from the target:",
+                wires.len()
+            );
+            if wires.is_empty() {
+                let _ = writeln!(s, "  (no signal of this cone is called '{f}')");
+            }
+        }
+        None => {
+            let _ = writeln!(s, "Wires ({}), by distance from the target:", wires.len());
+        }
+    }
+    let name_width = wires
+        .iter()
+        .map(|&n| cone.node(n).name.len())
+        .max()
+        .unwrap_or(0)
+        .min(40);
     for n in wires {
         let node = cone.node(n);
-        let _ = write!(s, "  d{} {}", node.depth, node.name);
+        let head = format!("d{} {:<w$}", node.depth, node.name, w = name_width);
         match &node.kind {
             NodeKind::Gate {
-                cell, inst, inputs, func, ..
+                cell,
+                inst,
+                inputs,
+                func,
+                ..
             } => {
-                let mut pad = 30usize.saturating_sub(node.name.len());
-                if pad < 2 {
-                    pad = 2;
-                }
-                let _ = write!(s, "{}{cell}", " ".repeat(pad));
-                if !inst.is_empty() {
-                    let _ = write!(s, " {inst}");
-                }
+                let _ = writeln!(s, "  {head}  {cell} {inst}");
                 let local = render_bool(func, &|var| {
                     inputs
                         .iter()
@@ -108,25 +189,27 @@ pub fn render(
                         .map(|(_, i)| cone.node(*i).name.clone())
                         .unwrap_or_else(|| var.to_string())
                 });
-                let _ = writeln!(s, "\n        local:    {local}");
+                let _ = writeln!(s, "        local:    {local}");
             }
             NodeKind::Alias { src, inv, via } => {
-                let _ = writeln!(
-                    s,
-                    "\n        local:    {}{}  ({via})",
-                    if *inv { "!" } else { "" },
-                    cone.node(*src).name
-                );
+                let _ = writeln!(s, "  {head}  ({via})");
+                let bang = if *inv { "!" } else { "" };
+                let _ = writeln!(s, "        local:    {bang}{}", cone.node(*src).name);
             }
-            _ => {}
+            _ => continue,
         }
         if let Some(a) = analysis
             && let Some(info) = &a.wires[n as usize]
         {
             if let Some(form) = &info.endpoint_form {
-                let _ = writeln!(s, "        endpoint: {form}");
+                let mark = if info.unproven {
+                    "   [simulation-matched, unproven]"
+                } else {
+                    ""
+                };
+                let _ = writeln!(s, "        endpoint: {form}{mark}");
             } else if info.cut {
-                let _ = writeln!(s, "        endpoint: [CUT] logic too large to compute");
+                let _ = writeln!(s, "        endpoint: [CUT] too large to compute; see the local form");
             } else if let Some(why) = &info.omitted {
                 let _ = writeln!(s, "        endpoint: <{why}>");
             }
@@ -137,96 +220,138 @@ pub fn render(
     }
     let _ = writeln!(s);
 
-    // Everything uncertain goes here: trace notes, analysis notes, and what
-    // each non-obvious endpoint is.
+    // ---- notes -------------------------------------------------------------
+    // Everything uncertain goes here: what the tracer assumed, what the
+    // analysis could not do, and what each unusual endpoint is.
     let mut notes: Vec<String> = cone.notes.clone();
     if let Some(a) = analysis {
         notes.extend(a.notes.iter().cloned());
     }
+    let mut order: Vec<&crate::trace::Endpoint> = cone
+        .endpoints
+        .iter()
+        .filter(|e| !e.detail.is_empty())
+        .collect();
+    order.sort_by_key(|e| kind_rank(e.kind));
+    const MAX_DETAILS: usize = 50;
     notes.extend(
-        cone.endpoints
+        order
             .iter()
-            .filter(|e| !e.detail.is_empty())
+            .take(MAX_DETAILS)
             .map(|e| format!("[{}] {}: {}", e.kind.label(), e.name, e.detail)),
     );
+    if order.len() > MAX_DETAILS {
+        notes.push(format!(
+            "... and {} more endpoints of the kinds above",
+            order.len() - MAX_DETAILS
+        ));
+    }
     if !notes.is_empty() {
         let _ = writeln!(s, "Notes:");
         for n in &notes {
             let _ = writeln!(s, "  - {n}");
         }
     }
-    if opts.dump_cone {
-        let _ = writeln!(s, "\nCone dump:\n{}", cone.dump());
-    }
     s
 }
 
-/// Nodes whose logic depends on an endpoint whose name contains `pat`.
-fn depended_on(cone: &Cone, analysis: Option<&Analysis>, pat: &str) -> Vec<bool> {
-    let mut marked = vec![false; cone.nodes.len()];
-    for (n, node) in cone.nodes.iter().enumerate() {
-        let own = match &node.kind {
-            NodeKind::Endpoint { ep, .. } => cone.endpoints[*ep as usize].name.contains(pat),
-            _ => false,
-        };
-        // An endpoint form mentioning the signal also counts.
-        let lifted = analysis
-            .and_then(|a| a.wires[n].as_ref())
-            .and_then(|w| w.endpoint_form.as_ref())
-            .is_some_and(|f| f.contains(pat));
-        marked[n] = own || lifted;
-    }
-    // topo lists inputs before their users, so one forward pass suffices.
-    for &n in cone.topo.iter() {
-        let deps: Vec<NodeId> = cone.inputs(n);
-        if deps.iter().any(|&d| marked[d as usize]) {
-            marked[n as usize] = true;
-        }
-    }
-    marked
-}
-
-/// Render a library function, substituting its variables.
+/// Render a library function with its pins replaced by net names.
+///
+/// The only precedence the output relies on is `&` over `|`; every other
+/// nesting is parenthesised.
 pub fn render_bool(e: &BoolExpr, name: &dyn Fn(&str) -> String) -> String {
-    render_prec(e, name, 0)
+    render_prec(e, name, LOOSE)
 }
 
-/// Precedence: or < and < xor < not.
-fn prec(e: &BoolExpr) -> u8 {
+const LOOSE: u8 = 0;
+const OR: u8 = 1;
+const AND: u8 = 2;
+const ATOM: u8 = 3;
+
+fn xor_operands<'e>(e: &'e BoolExpr, out: &mut Vec<&'e BoolExpr>) {
     match e {
-        BoolExpr::Or(_) => 0,
-        BoolExpr::And(_) => 1,
-        BoolExpr::Xor(..) => 2,
-        BoolExpr::Not(_) | BoolExpr::Var(_) | BoolExpr::Const(_) => 3,
+        BoolExpr::Xor(a, b) => {
+            xor_operands(a, out);
+            xor_operands(b, out);
+        }
+        other => out.push(other),
     }
 }
 
 fn render_prec(e: &BoolExpr, name: &dyn Fn(&str) -> String, min: u8) -> String {
-    let op = |xs: &[BoolExpr], sep: &str| {
+    let join = |xs: &[&BoolExpr], sep: &str, child_min: u8| {
         xs.iter()
-            .map(|x| render_prec(x, name, prec(e) + 1))
+            .map(|x| render_prec(x, name, child_min))
             .collect::<Vec<_>>()
             .join(sep)
     };
-    let body = match e {
-        BoolExpr::Const(true) => "1'b1".to_string(),
-        BoolExpr::Const(false) => "1'b0".to_string(),
-        BoolExpr::Var(v) => name(v),
-        BoolExpr::Not(x) => match &**x {
-            BoolExpr::Var(v) => format!("!{}", name(v)),
-            other => format!("!{}", render_prec(other, name, prec(e))),
-        },
-        BoolExpr::And(xs) => op(xs, " & "),
-        BoolExpr::Or(xs) => op(xs, " | "),
-        BoolExpr::Xor(a, b) => format!(
-            "{} ^ {}",
-            render_prec(a, name, prec(e)),
-            render_prec(b, name, prec(e) + 1)
-        ),
+    let (body, prec) = match e {
+        BoolExpr::Const(true) => ("1'b1".to_string(), ATOM),
+        BoolExpr::Const(false) => ("1'b0".to_string(), ATOM),
+        BoolExpr::Var(v) => (name(v), ATOM),
+        BoolExpr::Not(x) => (format!("!{}", render_prec(x, name, ATOM)), ATOM),
+        BoolExpr::And(xs) => (join(&xs.iter().collect::<Vec<_>>(), " & ", ATOM), AND),
+        BoolExpr::Or(xs) => (join(&xs.iter().collect::<Vec<_>>(), " | ", AND), OR),
+        BoolExpr::Xor(..) => {
+            let mut ops = Vec::new();
+            xor_operands(e, &mut ops);
+            (join(&ops, " ^ ", ATOM), LOOSE)
+        }
     };
-    if prec(e) < min {
+    if prec < min {
         format!("({body})")
     } else {
         body
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::liberty::func::parse_function;
+
+    fn local(func: &str) -> String {
+        render_bool(&parse_function(func).unwrap(), &|v| v.to_lowercase())
+    }
+
+    #[test]
+    fn and_terms_inside_or_need_no_parentheses() {
+        assert_eq!(local("(S&B)|(!S&A)"), "s & b | !s & a");
+        assert_eq!(local("A|B|C"), "a | b | c");
+    }
+
+    #[test]
+    fn every_other_nesting_is_parenthesised() {
+        assert_eq!(local("(A|B)&C"), "(a | b) & c");
+        assert_eq!(local("!((A0&A1)|B0)"), "!(a0 & a1 | b0)");
+        assert_eq!(local("!(A|B|C|D)"), "!(a | b | c | d)");
+        assert_eq!(local("(A^B)&C"), "(a ^ b) & c");
+        assert_eq!(local("(A&B)^C"), "(a & b) ^ c");
+        assert_eq!(local("(A^B)|C"), "(a ^ b) | c");
+        assert_eq!(local("!(A^B)"), "!(a ^ b)");
+    }
+
+    #[test]
+    fn xor_chains_are_flat() {
+        assert_eq!(local("A^B^CI"), "a ^ b ^ ci");
+    }
+
+    #[test]
+    fn filter_matches_whole_signal_names_only() {
+        assert!(filter_matches("state[3]", "state"));
+        assert!(filter_matches("state[3]", "state[3]"));
+        assert!(!filter_matches("state[3]", "state[2]"));
+        assert!(!filter_matches("nstate[3]", "state"));
+        assert!(filter_matches("mode", "mode"));
+        assert!(filter_matches("cnt_3_", "cnt"));
+    }
+
+    #[test]
+    fn filter_without_a_path_matches_in_any_instance() {
+        assert!(filter_matches("/u_core/u_cfg/mode", "mode"));
+        assert!(filter_matches("/u_core/u_cfg/mode[1]", "mode"));
+        assert!(filter_matches("/u_core/u_cfg/mode", "/u_core/u_cfg/mode"));
+        assert!(!filter_matches("/u_core/u_cfg/mode", "/u_x/mode"));
+        assert!(!filter_matches("/u_core/u_cfg/mode", "u_cfg"));
     }
 }

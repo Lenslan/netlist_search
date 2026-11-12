@@ -95,7 +95,7 @@ pub struct Lifter<'a> {
     pub opts: LiftOpts,
     memo: FxHashMap<Bd, Option<Rc<Expr>>>,
     work: usize,
-    pub notes: Vec<String>,
+    mismatch: bool,
     level_of: FxHashMap<(u32, i64), u32>,
 }
 
@@ -154,7 +154,7 @@ impl<'a> Lifter<'a> {
             opts,
             memo: FxHashMap::default(),
             work: 0,
-            notes: Vec::new(),
+            mismatch: false,
             level_of: vars
                 .iter()
                 .enumerate()
@@ -164,19 +164,32 @@ impl<'a> Lifter<'a> {
     }
 
     /// The most readable expression found for `f`, or `None` if `f` is beyond
-    /// the limits. The result is always checked against `f`.
+    /// the limits (size, or the effort limit set on the BDD). The result is
+    /// always proven equal to `f`.
     pub fn lift(&mut self, f: Bd) -> Option<Rc<Expr>> {
         self.work = WORK;
         let e = self.lift_rec(f, self.opts.depth)?;
-        if self.equals(f, &e) {
+        // The final proof must not be cut short by the effort limit.
+        let limit = self.bdd.take_ops_limit();
+        let proven = self.equals(f, &e);
+        self.bdd.set_ops_limit(limit);
+        if proven {
             return Some(e);
         }
         // Should be unreachable; never print an expression that is not exact.
-        self.notes.push(
-            "INTERNAL: a lifted expression did not match its function and was replaced by product terms"
-                .into(),
-        );
-        self.sop(f).filter(|s| self.equals(f, s))
+        self.mismatch = true;
+        None
+    }
+
+    /// True if a lifted expression failed its final proof since the last call.
+    pub fn take_mismatch(&mut self) -> bool {
+        std::mem::take(&mut self.mismatch)
+    }
+
+    /// Drop every BDD node not reachable from `roots` (which are renumbered).
+    pub fn gc(&mut self, roots: &mut [Bd]) {
+        self.memo.clear();
+        self.bdd.gc(roots);
     }
 
     fn equals(&mut self, f: Bd, e: &Expr) -> bool {
@@ -193,7 +206,10 @@ impl<'a> Lifter<'a> {
             return m.clone();
         }
         let r = self.lift_inner(f, depth);
-        self.memo.insert(f, r.clone());
+        // A result obtained after the effort ran out says nothing about `f`.
+        if !self.bdd.ops_exhausted() {
+            self.memo.insert(f, r.clone());
+        }
         r
     }
 
@@ -294,33 +310,36 @@ impl<'a> Lifter<'a> {
         self.arith_shape(f, groups)
     }
 
-    /// A predicate over one whole bus: equality, range, set membership, or
-    /// the top bit of the bus plus a constant.
+    /// A predicate over one bus: equality, range, set membership, or the top
+    /// bit of the bus plus a constant.
     fn predicate(&mut self, f: Bd, g: &Group) -> Option<Rc<Expr>> {
-        // `cnt[3:0] < 10` does not depend on cnt[0], but reads better over the
-        // whole bus than as `cnt[3:1] < 5`: extend the slice down to the
-        // lowest bit of the bus for ordering predicates.
-        let bus = self.vars[g.vars[0] as usize].bus;
-        let mut ext = g.clone();
-        while let Some(&v) = self.level_of.get(&(bus, ext.lo - 1)) {
-            ext.vars.insert(0, v);
-            ext.lo -= 1;
-        }
-        if ext.width() > g.width()
-            && let Some(e) = self.predicate_on(f, &ext)
-        {
-            let is_set = |e: &Expr| matches!(e, Expr::Inside { .. });
-            let pointwise = match &*e {
-                Expr::Inside { .. } => true,
-                Expr::Not(x) => is_set(x),
-                Expr::Cmp { op, .. } => matches!(op, CmpOp::Eq | CmpOp::Ne),
+        fn is_order(e: &Expr) -> bool {
+            match e {
+                Expr::Cmp { op, .. } => !matches!(op, CmpOp::Eq | CmpOp::Ne),
+                Expr::And(xs) | Expr::Or(xs) => xs.iter().all(|x| is_order(x)),
                 _ => false,
-            };
-            if !pointwise {
-                return Some(e);
             }
         }
-        self.predicate_on(f, g)
+        let e = self.predicate_on(f, g)?;
+        // `cnt[3:0] < 10` does not depend on cnt[0], so the function is only
+        // over cnt[3:1], where it reads `cnt[3:1] < 5`. Order tests are shown
+        // over the bus down to its lowest existing bit instead. Equality and
+        // sets stay on the slice: `cnt[7:4] == 5` is the natural form.
+        if is_order(&e) {
+            let bus = self.vars[g.vars[0] as usize].bus;
+            let mut ext = g.clone();
+            while let Some(&v) = self.level_of.get(&(bus, ext.lo - 1)) {
+                ext.vars.insert(0, v);
+                ext.lo -= 1;
+            }
+            if ext.width() > g.width()
+                && let Some(x) = self.predicate_on(f, &ext)
+                && is_order(&x)
+            {
+                return Some(x);
+            }
+        }
+        Some(e)
     }
 
     fn predicate_on(&mut self, f: Bd, g: &Group) -> Option<Rc<Expr>> {

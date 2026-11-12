@@ -140,6 +140,14 @@ impl<'a> Design<'a> {
         self.modules.iter().filter(|m| m.get().is_some()).count()
     }
 
+    /// Warnings from parsing module `id`, if it has been parsed.
+    pub fn module_warnings(&self, id: u32) -> &[String] {
+        match self.modules[id as usize].get() {
+            Some(Ok(m)) => &m.warnings,
+            _ => &[],
+        }
+    }
+
     /// Ports of a module without parsing its body, when possible.
     fn header(&self, id: u32) -> Result<&Module<'a>> {
         if let Some(Ok(m)) = self.modules[id as usize].get() {

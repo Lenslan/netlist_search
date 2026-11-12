@@ -5,6 +5,8 @@
 //! Every operation that can create nodes returns `Err(Blowup)` once the node
 //! limit (or the per-operation budget) is hit; the manager stays usable.
 
+use std::cell::Cell;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 pub type Bd = u32;
@@ -41,6 +43,9 @@ pub struct Bdd {
     nvars: u32,
     limit: usize,
     budget_end: usize,
+    /// Elementary steps done so far: a deterministic clock for effort limits.
+    ops: Cell<u64>,
+    ops_limit: u64,
 }
 
 impl Bdd {
@@ -57,6 +62,86 @@ impl Bdd {
             nvars: 0,
             limit: node_limit.max(2),
             budget_end: usize::MAX,
+            ops: Cell::new(0),
+            ops_limit: u64::MAX,
+        }
+    }
+
+    /// Change the total node limit.
+    pub fn set_limit(&mut self, node_limit: usize) {
+        self.limit = node_limit.max(2);
+    }
+
+    /// Work done so far, in elementary steps. Unlike wall-clock time this is
+    /// the same on every run, so effort limits give reproducible reports.
+    pub fn ops(&self) -> u64 {
+        self.ops.get()
+    }
+
+    /// Make every operation fail once `ops()` has passed `limit`.
+    pub fn set_ops_limit(&mut self, limit: u64) {
+        self.ops_limit = limit;
+    }
+
+    pub fn clear_ops_limit(&mut self) {
+        self.ops_limit = u64::MAX;
+    }
+
+    /// Remove the effort limit and return it, to be restored with `set_ops_limit`.
+    pub fn take_ops_limit(&mut self) -> u64 {
+        std::mem::replace(&mut self.ops_limit, u64::MAX)
+    }
+
+    pub fn ops_exhausted(&self) -> bool {
+        self.ops.get() > self.ops_limit
+    }
+
+    fn tick(&self) -> Result<(), Blowup> {
+        let o = self.ops.get() + 1;
+        self.ops.set(o);
+        if o > self.ops_limit { Err(Blowup) } else { Ok(()) }
+    }
+
+    /// Drop every node that is not reachable from `roots`, renumber the rest
+    /// and update `roots`. Every other `Bd` held by the caller becomes invalid.
+    pub fn gc(&mut self, roots: &mut [Bd]) {
+        let n = self.nodes.len();
+        let mut keep = vec![false; n];
+        keep[FALSE as usize] = true;
+        keep[TRUE as usize] = true;
+        let mut stack: Vec<Bd> = roots.to_vec();
+        while let Some(x) = stack.pop() {
+            if std::mem::replace(&mut keep[x as usize], true) {
+                continue;
+            }
+            stack.push(self.nodes[x as usize].lo);
+            stack.push(self.nodes[x as usize].hi);
+        }
+        // A node is always created after its children, so ids are already in
+        // dependency order and one forward pass can compact and renumber.
+        let mut remap = vec![0 as Bd; n];
+        let mut next = 0usize;
+        for i in 0..n {
+            if !keep[i] {
+                continue;
+            }
+            let mut node = self.nodes[i];
+            if node.var != TERMINAL {
+                node.lo = remap[node.lo as usize];
+                node.hi = remap[node.hi as usize];
+            }
+            self.nodes[next] = node;
+            remap[i] = next as Bd;
+            next += 1;
+        }
+        self.nodes.truncate(next);
+        self.unique.clear();
+        for (i, node) in self.nodes.iter().enumerate().skip(2) {
+            self.unique.insert((node.var, node.lo, node.hi), i as Bd);
+        }
+        self.cache.clear();
+        for r in roots.iter_mut() {
+            *r = remap[*r as usize];
         }
     }
 
@@ -93,16 +178,29 @@ impl Bdd {
         if self.nodes.len() >= self.limit.min(self.budget_end) {
             return Err(Blowup);
         }
+        self.tick()?;
         let id = self.nodes.len() as Bd;
         self.nodes.push(BNode { var, lo, hi });
         self.unique.insert((var, lo, hi), id);
         Ok(id)
     }
 
-    /// The function "variable `v` is 1".
+    /// The function "variable `v` is 1". This never fails: variables are
+    /// exempt from the node and effort limits, because nothing can be
+    /// expressed without them.
     pub fn var(&mut self, v: u32) -> BResult {
         debug_assert!(v < self.nvars);
-        self.mk(v, FALSE, TRUE)
+        if let Some(&n) = self.unique.get(&(v, FALSE, TRUE)) {
+            return Ok(n);
+        }
+        let id = self.nodes.len() as Bd;
+        self.nodes.push(BNode {
+            var: v,
+            lo: FALSE,
+            hi: TRUE,
+        });
+        self.unique.insert((v, FALSE, TRUE), id);
+        Ok(id)
     }
 
     pub fn constant(&self, value: bool) -> Bd {
@@ -121,8 +219,9 @@ impl Bdd {
 
     /// Cofactors of `f` with respect to `v`, which must be at or above its root.
     pub fn cofactors(&self, f: Bd, v: u32) -> (Bd, Bd) {
+        // Levels grow downwards and a terminal has the largest level of all.
         assert!(
-            self.nodes[f as usize].var == TERMINAL || self.nodes[f as usize].var <= v,
+            self.nodes[f as usize].var >= v,
             "variable is below the root of f"
         );
         self.split(f, v)
@@ -139,7 +238,7 @@ impl Bdd {
     }
 
     fn remember(&mut self, key: (u8, Bd, Bd, Bd), r: Bd) {
-        if self.cache.len() > 8_000_000 {
+        if self.cache.len() > 2_000_000 {
             self.cache.clear();
         }
         self.cache.insert(key, r);
@@ -153,6 +252,7 @@ impl Bdd {
         if let Some(r) = self.cached(key) {
             return Ok(r);
         }
+        self.tick()?;
         let n = self.nodes[f as usize];
         let lo = self.not(n.lo)?;
         let hi = self.not(n.hi)?;
@@ -213,6 +313,7 @@ impl Bdd {
         if let Some(r) = self.cached(key) {
             return Ok(r);
         }
+        self.tick()?;
         let v = self.level(a).min(self.level(b));
         let (a0, a1) = self.split(a, v);
         let (b0, b1) = self.split(b, v);
@@ -244,6 +345,7 @@ impl Bdd {
         if let Some(r) = self.cached(key) {
             return Ok(r);
         }
+        self.tick()?;
         let v = self.level(c).min(self.level(t)).min(self.level(e));
         let (c0, c1) = self.split(c, v);
         let (t0, t1) = self.split(t, v);
@@ -268,6 +370,7 @@ impl Bdd {
         if let Some(r) = self.cached(key) {
             return Ok(r);
         }
+        self.tick()?;
         let lo = self.restrict(n.lo, v, value)?;
         let hi = self.restrict(n.hi, v, value)?;
         let r = self.mk(n.var, lo, hi)?;
@@ -305,6 +408,7 @@ impl Bdd {
         if let Some(&r) = memo.get(&f) {
             return Ok(r);
         }
+        self.tick()?;
         let lo = self.exists_rec(n.lo, set, max, memo)?;
         let hi = self.exists_rec(n.hi, set, max, memo)?;
         let r = if set.contains(&n.var) {
@@ -337,6 +441,7 @@ impl Bdd {
             stack.push(n.lo);
             stack.push(n.hi);
         }
+        self.ops.set(self.ops.get() + seen.len() as u64);
         let mut v: Vec<u32> = vars.into_iter().collect();
         v.sort_unstable();
         v
@@ -354,6 +459,7 @@ impl Bdd {
             stack.push(n.lo);
             stack.push(n.hi);
         }
+        self.ops.set(self.ops.get() + seen.len() as u64);
         seen.len()
     }
 
@@ -695,6 +801,84 @@ mod tests {
         assert!(blew);
         assert_eq!(b.and(vars[0], vars[0]).unwrap(), vars[0]);
         assert!(b.node_count() <= 40);
+    }
+
+    #[test]
+    fn variables_are_exempt_from_the_limits() {
+        let mut b = Bdd::new(2);
+        let v = b.new_var();
+        b.set_ops_limit(0);
+        let x = b.var(v).unwrap();
+        assert_eq!(b.top_var(x), Some(0));
+        assert!(b.not(x).is_err(), "everything else is refused");
+    }
+
+    #[test]
+    fn effort_limit_stops_work_and_can_be_lifted() {
+        let (mut b, v) = mgr(12);
+        b.set_ops_limit(b.ops() + 5);
+        let mut f = FALSE;
+        let mut failed = false;
+        for pair in v.chunks(2) {
+            let r = b.and(pair[0], pair[1]).and_then(|t| b.xor(f, t));
+            match r {
+                Ok(x) => f = x,
+                Err(Blowup) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        assert!(failed);
+        assert!(b.ops_exhausted());
+        b.clear_ops_limit();
+        assert!(!b.ops_exhausted());
+        assert!(b.and(v[0], v[1]).is_ok());
+    }
+
+    #[test]
+    fn the_same_work_always_costs_the_same() {
+        let run = || {
+            let (mut b, v) = mgr(10);
+            let mut f = FALSE;
+            for pair in v.chunks(2) {
+                let t = b.and(pair[0], pair[1]).unwrap();
+                f = b.xor(f, t).unwrap();
+            }
+            b.support(f);
+            b.ops()
+        };
+        assert_eq!(run(), run());
+        assert!(run() > 0);
+    }
+
+    #[test]
+    fn garbage_collection_keeps_roots_and_their_meaning() {
+        let (mut b, v) = mgr(6);
+        let keep1 = b.ite(v[0], v[1], v[2]).unwrap();
+        let keep2 = b.xor(v[3], v[4]).unwrap();
+        // Garbage.
+        let mut g = FALSE;
+        for &x in &v {
+            let t = b.and(x, keep1).unwrap();
+            g = b.xor(g, t).unwrap();
+        }
+        let before = b.node_count();
+        let table = |b: &Bdd, f: Bd| -> Vec<bool> {
+            (0..64u32).map(|row| b.eval(f, &|x| row >> x & 1 == 1)).collect()
+        };
+        let (t1, t2) = (table(&b, keep1), table(&b, keep2));
+        let mut roots = [keep1, keep2, TRUE, FALSE];
+        b.gc(&mut roots);
+        assert!(b.node_count() < before);
+        assert_eq!(table(&b, roots[0]), t1);
+        assert_eq!(table(&b, roots[1]), t2);
+        assert_eq!((roots[2], roots[3]), (TRUE, FALSE));
+        // The manager is still canonical: rebuilding gives the same nodes.
+        let vars: Vec<Bd> = (0..6).map(|i| b.var(i).unwrap()).collect();
+        assert_eq!(b.ite(vars[0], vars[1], vars[2]).unwrap(), roots[0]);
+        assert_eq!(b.xor(vars[3], vars[4]).unwrap(), roots[1]);
+        assert_eq!(b.size(roots[0]), 3);
     }
 
     #[test]
