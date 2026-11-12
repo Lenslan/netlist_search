@@ -7,23 +7,7 @@ use crate::netlist::design::{Design, InstPath};
 use crate::liberty::BoolExpr;
 use crate::trace::{Cone, NodeId, NodeKind};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Radix {
-    Dec,
-    Hex,
-    Bin,
-}
-
-impl Radix {
-    pub fn parse(s: &str) -> Option<Radix> {
-        Some(match s {
-            "dec" | "d" | "decimal" => Radix::Dec,
-            "hex" | "h" | "hexadecimal" => Radix::Hex,
-            "bin" | "b" | "binary" => Radix::Bin,
-            _ => return None,
-        })
-    }
-}
+pub use crate::logic::expr::Radix;
 
 #[derive(Debug, Clone)]
 pub struct ReportOpts {
