@@ -327,7 +327,7 @@ pub fn trace(design: &Design, path: &InstPath, bit: BitId, opts: &TraceOpts) -> 
             shown.push(format!("... and {} more", n - 8));
         }
         t.note(format!(
-            "{n} net(s) with a known driver also connect to pins of unknown cells; those pins are              assumed to be loads: {}",
+            "{n} net(s) with a known driver also connect to pins of unknown cells; those pins are assumed to be loads: {}",
             shown.join("; ")
         ));
     }
