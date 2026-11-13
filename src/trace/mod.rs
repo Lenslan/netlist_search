@@ -251,6 +251,8 @@ struct Tracer<'d, 'a> {
     heap: BinaryHeap<(Reverse<u32>, NodeId)>,
     order: Vec<NodeId>,
     notes: Vec<String>,
+    /// Nets with a known driver that also touch pins of unknown cells.
+    assumed_loads: Vec<String>,
     truncated: bool,
 }
 
@@ -278,6 +280,7 @@ pub fn trace(design: &Design, path: &InstPath, bit: BitId, opts: &TraceOpts) -> 
         heap: BinaryHeap::new(),
         order: Vec::new(),
         notes: Vec::new(),
+        assumed_loads: Vec::new(),
         truncated: false,
     };
     // Contexts from the top module down to the target instance.
@@ -315,6 +318,17 @@ pub fn trace(design: &Design, path: &InstPath, bit: BitId, opts: &TraceOpts) -> 
         t.note(format!(
             "the cone is larger than --max-nodes ({}); nets far from the target were not traced (TRUNCATED)",
             t.opts.max_nodes
+        ));
+    }
+    if !t.assumed_loads.is_empty() {
+        let n = t.assumed_loads.len();
+        let mut shown: Vec<String> = t.assumed_loads.iter().take(8).cloned().collect();
+        if n > 8 {
+            shown.push(format!("... and {} more", n - 8));
+        }
+        t.note(format!(
+            "{n} net(s) with a known driver also connect to pins of unknown cells; those pins are              assumed to be loads: {}",
+            shown.join("; ")
         ));
     }
     let topo = t.topo_sort(target);
@@ -693,10 +707,8 @@ impl<'d, 'a> Tracer<'d, 'a> {
             return Ok(());
         }
         if !unknown.is_empty() {
-            self.note(format!(
-                "net {name} also connects to pins of unknown cells ({}); they are assumed to be loads",
-                unknown_desc.join(", ")
-            ));
+            let pins: Vec<String> = unknown_desc.iter().map(|d| format!("{prefix}{d}")).collect();
+            self.assumed_loads.push(format!("{name} <- {}", pins.join(", ")));
         }
         if drivers.len() > 1 {
             let list: Vec<String> = drivers
