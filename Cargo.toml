@@ -2,6 +2,7 @@
 name = "netlist_search"
 version = "0.1.0"
 edition = "2024"
+default-run = "netlist_search"
 description = "Trace a gate-level netlist wire backwards to registers, black boxes and ports, and lift the cone logic into readable RTL-style expressions"
 license = "MIT OR Apache-2.0"
 

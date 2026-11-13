@@ -486,3 +486,64 @@ fn synth_constants_do_not_reach_the_netlist_as_gates() {
     assert_eq!(s.and(&a, &ONE), a);
     assert_eq!(s.lines(), 0);
 }
+
+#[test]
+fn wide_multiplier_is_matched_in_simulation_and_marked_unproven() {
+    let mut s = Synth::new("m", 11);
+    let a = s.reg("a", 16);
+    let b = s.reg("b", 16);
+    let p = s.mul(&a, &b);
+    s.name_net(&p[20], "p20");
+    let v = s.emit();
+
+    let lib = lib();
+    let index = ModuleIndex::build(&[v.as_bytes()]).unwrap();
+    let design = Design::new(index, &lib);
+    let path = design.resolve(None, "").unwrap();
+    let m = design.module(path.module()).unwrap();
+    let bit = design.find_wire_bits(m, "p20").unwrap()[0];
+    let cone = trace(&design, &path, bit, &TraceOpts::default()).unwrap();
+    let mut shown = vec![false; cone.nodes.len()];
+    shown[cone.target as usize] = true;
+
+    let a = analyze(&cone, Some(&shown), &AnalyzeOpts::default());
+    let info = a.wires[cone.target as usize].clone().unwrap();
+    assert_eq!(info.endpoint_form.as_deref(), Some("(a[15:0] * b[15:0])[20]"));
+    assert!(info.unproven);
+    assert!(a.notes.iter().any(|n| n.contains("unproven")), "{:?}", a.notes);
+
+    let strict = AnalyzeOpts {
+        strict: true,
+        ..AnalyzeOpts::default()
+    };
+    let a = analyze(&cone, Some(&shown), &strict);
+    let info = a.wires[cone.target as usize].clone().unwrap();
+    assert!(!info.unproven);
+    assert!(info.endpoint_form.as_deref() != Some("(a[15:0] * b[15:0])[20]"));
+}
+
+#[test]
+fn random_logic_is_not_mistaken_for_a_product() {
+    for seed in 1..=10u64 {
+        let mut s = Synth::new("m", seed * 131);
+        let a = s.reg("a", 6);
+        let b = s.reg("b", 6);
+        let mut ins = a.clone();
+        ins.extend(b);
+        let out = s.random_logic(&ins, 40, 1);
+        if matches!(out[0], Sig::Const(_)) {
+            continue;
+        }
+        s.name_net(&out[0], "f");
+        let v = s.emit();
+        let lib = lib();
+        let index = ModuleIndex::build(&[v.as_bytes()]).unwrap();
+        let design = Design::new(index, &lib);
+        let path = design.resolve(None, "").unwrap();
+        let m = design.module(path.module()).unwrap();
+        let bit = design.find_wire_bits(m, "f").unwrap()[0];
+        let cone = trace(&design, &path, bit, &TraceOpts::default()).unwrap();
+        let a = analyze(&cone, None, &AnalyzeOpts::default());
+        assert!(a.wires.iter().flatten().all(|w| !w.unproven), "seed {seed}");
+    }
+}

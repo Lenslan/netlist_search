@@ -200,6 +200,8 @@ fn build(cone: &Cone, mut vars: Vec<VarInfo>, level_of_ep: Vec<u32>, opts: &Anal
     let mut cuts = 0usize;
     let mut budget = opts.gate_budget;
     let mut gc_at = gc_threshold(&bdd, opts.node_limit);
+    // Once this much work is spent, every further gate is cut at once.
+    bdd.set_ops_limit(opts.total_effort);
     for &id in &cone.topo {
         let mut r = node_func(&mut bdd, cone, id, &func, &level_of_ep, budget);
         if r.is_err() && bdd.node_count() > gc_at {
@@ -227,6 +229,7 @@ fn build(cone: &Cone, mut vars: Vec<VarInfo>, level_of_ep: Vec<u32>, opts: &Anal
             }
         };
     }
+    bdd.clear_ops_limit();
     Built {
         bdd,
         vars,
@@ -324,7 +327,7 @@ pub fn analyze(cone: &Cone, wanted: Option<&[bool]>, opts: &AnalyzeOpts) -> Anal
 
     // Phase 1: the function of every node.
     let mut built = build(cone, vars.clone(), levels(&order), opts);
-    if built.cuts > 0 {
+    if built.cuts > 0 && n <= 50_000 {
         // The name-based order did not fit this logic: try the structural one.
         let mut info: Vec<Option<&VarInfo>> = vec![None; names.len()];
         for (level, &pos) in order.iter().enumerate() {

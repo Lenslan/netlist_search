@@ -171,14 +171,18 @@ impl<'a> Lifter<'a> {
         let e = self.lift_rec(f, self.opts.depth)?;
         // The final proof must not be cut short by the effort limit.
         let limit = self.bdd.take_ops_limit();
-        let proven = self.equals(f, &e);
+        let back = e.to_bdd(self.bdd);
         self.bdd.set_ops_limit(limit);
-        if proven {
-            return Some(e);
+        match back {
+            Ok(g) if g == f => Some(e),
+            // Different function: should be unreachable. Never print it.
+            Ok(_) => {
+                self.mismatch = true;
+                None
+            }
+            // No room left to build the proof: no result, but no error either.
+            Err(_) => None,
         }
-        // Should be unreachable; never print an expression that is not exact.
-        self.mismatch = true;
-        None
     }
 
     /// True if a lifted expression failed its final proof since the last call.
@@ -232,14 +236,26 @@ impl<'a> Lifter<'a> {
         if let Some(e) = self.leaf(f, &groups, sup.len()) {
             return Some(e);
         }
+        let split = self.decompose(f, &groups, depth);
+        let separable = split.is_some();
         let cands = [
-            self.decompose(f, &groups, depth),
+            split,
             self.mux_decompose(f, &sup, depth),
             self.case_shape(f, &groups, depth),
             self.sop(f),
             self.neg_sop(f),
         ];
-        cands.into_iter().flatten().min_by_key(|e| e.size())
+        let best = cands.into_iter().flatten().min_by_key(|e| e.size());
+        // Branching on the value of a state-like bus is how the RTL was
+        // written, so that form wins unless it is clearly longer.
+        if separable {
+            return best;
+        }
+        match (self.bus_branches(f, &groups, depth), best) {
+            (Some(b), Some(o)) if b.size() * 2 > o.size() * 3 => Some(o),
+            (Some(b), _) => Some(b),
+            (None, o) => o,
+        }
     }
 
     // ---- structure of the support ------------------------------------------
@@ -627,6 +643,108 @@ impl<'a> Lifter<'a> {
             }
         }
         None
+    }
+
+    /// Branches selected by the value of a narrow bus, the shape of state
+    /// machine logic: `state == 5 ? a : state == 9 ? b : rest(state)`.
+    ///
+    /// The bus is a condition if fixing it leaves only a few different
+    /// functions of the other inputs.
+    fn bus_branches(&mut self, f: Bd, groups: &[Group], depth: usize) -> Option<Rc<Expr>> {
+        const MAX_WIDTH: usize = 8;
+        const MAX_BRANCHES: usize = 3;
+        if groups.len() < 2 {
+            return None;
+        }
+        let mut cands: Vec<&Group> = groups
+            .iter()
+            .filter(|g| !g.scalar && g.width() <= MAX_WIDTH)
+            .collect();
+        cands.sort_by_key(|g| g.width());
+        'next: for sel in cands.into_iter().take(2) {
+            // Distinct non-constant cofactors, each with the values selecting it.
+            let mut branches: Vec<(Bd, Vec<usize>)> = Vec::new();
+            let mut ones: Vec<usize> = Vec::new();
+            for val in 0..1usize << sel.width() {
+                let assign: Vec<(u32, bool)> = sel
+                    .vars
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| (v, val >> i & 1 == 1))
+                    .collect();
+                let c = self.bdd.restrict_all(f, &assign).ok()?;
+                match c {
+                    FALSE => {}
+                    TRUE => ones.push(val),
+                    _ => match branches.iter_mut().find(|(b, _)| *b == c) {
+                        Some((_, vals)) => vals.push(val),
+                        None => {
+                            if branches.len() == MAX_BRANCHES {
+                                continue 'next;
+                            }
+                            branches.push((c, vec![val]));
+                        }
+                    },
+                }
+            }
+            // A branch must name particular values of the bus; a condition
+            // that holds for half of them is just one of its bits.
+            let half = 1usize << (sel.width() - 1);
+            if branches.is_empty() || branches.iter().any(|(_, vals)| vals.len() >= half) {
+                continue;
+            }
+            // Rarest condition first: `state == 5 ? ... : (the common case)`.
+            branches.sort_by_key(|(_, vals)| vals.len());
+            // In the final else the branch values cannot occur, so they are
+            // free: take whichever choice reads shorter (`state[0]` rather
+            // than a list of the odd states without 5).
+            let mut tail = {
+                let rest = self.value_set(sel, &ones)?;
+                let plain = self.lift_rec(rest, depth - 1)?;
+                let mut wide = ones.clone();
+                wide.extend(branches.iter().flat_map(|(_, v)| v.iter().copied()));
+                let rest = self.value_set(sel, &wide)?;
+                match self.lift_rec(rest, depth - 1) {
+                    Some(w) if w.size() < plain.size() => w,
+                    _ => plain,
+                }
+            };
+            for (i, (cof, vals)) in branches.iter().enumerate().rev() {
+                let cond = self.value_set(sel, vals)?;
+                let cond = self.lift_rec(cond, depth - 1)?;
+                let then = self.lift_rec(*cof, depth - 1)?;
+                let last = i == branches.len() - 1;
+                tail = if last && matches!(*tail, Expr::Const(false)) {
+                    mk_and(vec![cond, then])
+                } else {
+                    Rc::new(Expr::Mux(cond, then, tail))
+                };
+            }
+            if self.equals(f, &tail) {
+                return Some(tail);
+            }
+        }
+        None
+    }
+
+    /// The function "the bits of `g` form one of `values`".
+    fn value_set(&mut self, g: &Group, values: &[usize]) -> Option<Bd> {
+        let mut f = FALSE;
+        for &val in values {
+            let cube: isop::Cube = {
+                let mut c: Vec<(u32, bool)> = g
+                    .vars
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| (v, val >> i & 1 == 1))
+                    .collect();
+                c.sort_unstable();
+                c
+            };
+            let c = isop::cube_bdd(self.bdd, &cube).ok()?;
+            f = self.bdd.or(f, c).ok()?;
+        }
+        Some(f)
     }
 
     /// One bit of the sum, difference or product of two buses.

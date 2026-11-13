@@ -469,3 +469,37 @@ fn a_function_over_too_many_inputs_is_declined() {
     let mut l = Lifter::new(&mut x.b, &x.vars, opts);
     assert!(l.lift(f).is_none());
 }
+
+// ---- branches on a state register ---------------------------------------------
+
+#[test]
+fn branch_taken_in_one_state() {
+    let mut x = Fx::new(&["state[4]", "cnt[8]", "hit"]);
+    let (st, cnt) = (x.bus("state", 3, 0), x.bus("cnt", 7, 0));
+    let is5 = x.eq_const(&st, 5);
+    let lt = x.lt_const(&cnt, 200);
+    let cond = x.and(is5, lt);
+    let hit = x.v("hit");
+    let f = x.ite(cond, hit, st[0]);
+    assert_eq!(
+        x.lift(f),
+        "state[3:0] == 5 ? hit | cnt[7:0] >= 200 : state[0]"
+    );
+}
+
+#[test]
+fn two_states_with_different_actions() {
+    let mut x = Fx::new(&["state[3]", "a[4]", "b[4]", "go"]);
+    let (st, a, b) = (x.bus("state", 2, 0), x.bus("a", 3, 0), x.bus("b", 3, 0));
+    let s2 = x.eq_const(&st, 2);
+    let s6 = x.eq_const(&st, 6);
+    let lt = words::ult(&mut x.b, &a, &b).unwrap();
+    let go = x.v("go");
+    let t2 = x.and(s2, lt);
+    let t6 = x.and(s6, go);
+    let f = x.or(t2, t6);
+    assert_eq!(
+        x.lift(f),
+        "state[2:0] == 2 ? a[3:0] < b[3:0] : state[2:0] == 6 & go"
+    );
+}
