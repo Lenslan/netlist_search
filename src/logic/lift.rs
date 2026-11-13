@@ -210,8 +210,9 @@ impl<'a> Lifter<'a> {
             return m.clone();
         }
         let r = self.lift_inner(f, depth);
-        // A result obtained after the effort ran out says nothing about `f`.
-        if !self.bdd.ops_exhausted() {
+        // A result obtained after the effort or the work budget ran out is
+        // not the best form of `f`: do not remember it.
+        if !self.bdd.ops_exhausted() && self.work > 0 {
             self.memo.insert(f, r.clone());
         }
         r
@@ -236,8 +237,20 @@ impl<'a> Lifter<'a> {
         if let Some(e) = self.leaf(f, &groups, sup.len()) {
             return Some(e);
         }
+        // The same shapes, inverted: `!bitmap[idx]`, `!(a + b)[3]`.
+        if let Ok(nf) = self.bdd.not(f)
+            && let Some(e) = self.leaf(nf, &groups, sup.len())
+        {
+            return Some(Rc::new(Expr::Not(e)));
+        }
         let split = self.decompose(f, &groups, depth);
-        let separable = split.is_some();
+        // Branching on the value of a state-like bus is how the RTL was
+        // written: when the logic does not simply split into independent
+        // parts, that form is tried first and kept unless another is clearly shorter.
+        let branches = match split {
+            Some(_) => None,
+            None => self.bus_branches(f, &groups, depth),
+        };
         let cands = [
             split,
             self.mux_decompose(f, &sup, depth),
@@ -246,12 +259,7 @@ impl<'a> Lifter<'a> {
             self.neg_sop(f),
         ];
         let best = cands.into_iter().flatten().min_by_key(|e| e.size());
-        // Branching on the value of a state-like bus is how the RTL was
-        // written, so that form wins unless it is clearly longer.
-        if separable {
-            return best;
-        }
-        match (self.bus_branches(f, &groups, depth), best) {
+        match (branches, best) {
             (Some(b), Some(o)) if b.size() * 2 > o.size() * 3 => Some(o),
             (Some(b), _) => Some(b),
             (None, o) => o,
